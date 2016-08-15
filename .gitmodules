@@ -1,0 +1,3 @@
+[submodule "lib/Scarab"]
+	path = lib/Scarab
+	url = git@github.com:ThoughtWorksIoTGurgaon/scarab.git
