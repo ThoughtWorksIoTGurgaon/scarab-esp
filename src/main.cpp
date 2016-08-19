@@ -1,79 +1,212 @@
+#include <FS.h>                   //this needs to be first, or it all crashes and burns...
 #include <ESP8266WiFi.h>          //https://github.com/esp8266/Arduino
+
 //needed for library
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
-#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
+#include <WiFiManager.h>          //https://github.com/tzapu/WiFiManager
+#include <ArduinoJson.h>          //https://github.com/bblanchon/ArduinoJson
 #include <PubSubClient.h>
 
+#include <Service/Device/DeviceService.h>
+#include <Service/Switch/SwitchService.h>
+
+#define NO_OF_SUPPORTED_SERVICES 2
+#define NO_OF_SERVICES_INSTANTIATED 2
+#define GPIO2 2
+
+//define your default values here, if there are different values in config.json, they are overwritten.
 char mqtt_server[40];
+char mqtt_port[6] = "1883";
+
+//flag for saving data
+bool shouldSaveConfig = false;
+
+DeviceService deviceService(
+  new Service*[NO_OF_SUPPORTED_SERVICES]{
+    0, new SwitchService()
+  },
+  NO_OF_SERVICES_INSTANTIATED
+);
 
 WiFiClient espClient;
-PubSubClient client(espClient);
+PubSubClient mqttClient(espClient);
 long lastMsg = 0;
 char msg[50];
 int value = 0;
 
-
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
-
-  // Switch on the LED if an 1 was received as first character
-  if ((char)payload[0] == '1') {
-    digitalWrite(BUILTIN_LED, LOW);   // Turn the LED on (Note that LOW is the voltage level
-    // but actually the LED is on; this is because
-    // it is acive low on the ESP-01)
-  } else {
-    digitalWrite(BUILTIN_LED, HIGH);  // Turn the LED off by making the voltage HIGH
-  }
-
+//callback notifying us of the need to save config
+void saveConfigCallback () {
+  Serial.println("Should save config");
+  shouldSaveConfig = true;
 }
 
-void setup() {
-    Serial.begin(115200);
-    WiFiManager wifiManager;
-    //wifiManager.resetSettings(); //reset saved settings
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");Serial.print(topic);Serial.print("] ");
+  // Allocate the correct amount of memory for the payload copy
+  char* p = (char*)malloc(length+1);
+  // Copy the payload to the new buffer
+  memcpy(p,payload,length);
+  p[length]=0;
+  Serial.println(p);
 
-    WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server, 40);
-    wifiManager.addParameter(&custom_mqtt_server);
+  deviceService.process(Packet::parseWrite(p));
+  // Free the memory
+  free(p);
+}
 
-    if (!wifiManager.autoConnect()) {
-        Serial.println("failed to connect and hit timeout");
-        delay(3000);
-        //reset and try again, or maybe put it to deep sleep
-        ESP.reset();
-        delay(5000);
+void readConfig() {
+  if (SPIFFS.exists("/config.json")) {
+    //file exists, reading and loading
+    Serial.println("reading config file");
+    File configFile = SPIFFS.open("/config.json", "r");
+    if (configFile) {
+      Serial.println("opened config file");
+      size_t size = configFile.size();
+      // Allocate a buffer to store contents of the file.
+      std::unique_ptr<char[]> buf(new char[size]);
+
+      configFile.readBytes(buf.get(), size);
+      DynamicJsonBuffer jsonBuffer;
+      JsonObject& json = jsonBuffer.parseObject(buf.get());
+      json.printTo(Serial);
+      if (json.success()) {
+        Serial.println("\nparsed json");
+
+        strcpy(mqtt_server, json["mqtt_server"]);
+        strcpy(mqtt_port, json["mqtt_port"]);
+
+      } else {
+        Serial.println("failed to load json config");
       }
+    }
+  }
+}
+
+void setupWifiUsingWifiManger() {
+    // The extra parameters to be configured (can be either global or just in the setup)
+    // After connecting, parameter.getValue() will get you the configured value
+    // id/name placeholder/prompt default length
+    WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server, 40);
+    WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 5);
+
+    //WiFiManager
+    //Local intialization. Once its business is done, there is no need to keep it around
+    WiFiManager wifiManager;
+
+    //set config save notify callback
+    wifiManager.setSaveConfigCallback(saveConfigCallback);
+
+    //add all your parameters here
+    wifiManager.addParameter(&custom_mqtt_server);
+    wifiManager.addParameter(&custom_mqtt_port);
+
+    //reset settings - for testing
+    //wifiManager.resetSettings();
+
+    //set minimu quality of signal so it ignores AP's under that quality
+    //defaults to 8%
+    //wifiManager.setMinimumSignalQuality();
+
+    //sets timeout until configuration portal gets turned off
+    //useful to make it all retry or go to sleep
+    //in seconds
+    //wifiManager.setTimeout(120);
+
+    //fetches ssid and pass and tries to connect
+    //if it does not connect it starts an access point with the specified name
+    //here  "AutoConnectAP"
+    //and goes into a blocking loop awaiting configuration
+    if (!wifiManager.autoConnect()) {
+      Serial.println("failed to connect and hit timeout");
+      delay(3000);
+      //reset and try again, or maybe put it to deep sleep
+      ESP.reset();
+      delay(5000);
+    }
 
     //if you get here you have connected to the WiFi
     Serial.println("connected...yeey :)");
 
     //read updated parameters
     strcpy(mqtt_server, custom_mqtt_server.getValue());
-    client.setServer(mqtt_server, 1883);
-    client.setCallback(callback);
-    client.subscribe("inTopic");
+    strcpy(mqtt_port, custom_mqtt_port.getValue());
+}
+
+void saveConfig() {
+  //save the custom parameters to FS
+  if (shouldSaveConfig) {
+    Serial.println("saving config");
+    DynamicJsonBuffer jsonBuffer;
+    JsonObject& json = jsonBuffer.createObject();
+    json["mqtt_server"] = mqtt_server;
+    json["mqtt_port"] = mqtt_port;
+
+    File configFile = SPIFFS.open("/config.json", "w");
+    if (!configFile) {
+      Serial.println("failed to open config file for writing");
+    }
+
+    json.printTo(Serial);
+    json.printTo(configFile);
+    configFile.close();
+    //end save
+  }
+}
+
+int digitalWriteCallback(int portNumber, int level){
+  digitalWrite(portNumber, level);
+  return level;
+}
+
+void setup() {
+  // put your setup code here, to run once:
+  Serial.begin(115200);
+  Serial.println();
+
+  //clean FS, for testing
+  // SPIFFS.format();
+
+  //read configuration from FS json
+  Serial.println("mounting FS...");
+
+  if (SPIFFS.begin()) {
+    Serial.println("mounted file system");
+    readConfig();
+  } else {
+    Serial.println("failed to mount FS");
+  }
+  //end read
+
+  setupWifiUsingWifiManger();
+  saveConfig();
+
+  pinMode(GPIO2, OUTPUT);
+  digitalWrite(GPIO2, HIGH);
+
+  deviceService.attachDigitalWriteCallBack(digitalWriteCallback);
+  deviceService.newService(SWH, new int[1]{GPIO2});
+
+  mqttClient.setServer(mqtt_server, atoi( mqtt_port ));
+  mqttClient.setCallback(mqttCallback);
+
+  Serial.println();
 }
 
 void reconnect() {
   // Loop until we're reconnected
-  while (!client.connected()) {
+  while (!mqttClient.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect("ESP8266Client")) {
+    if (mqttClient.connect("ESP8266Client")) {
       Serial.println("connected");
-      // Once connected, publish an announcement...
-      client.publish("outTopic", "hello world");
-      // ... and resubscribe
-      client.subscribe("inTopic");
+      mqttClient.subscribe("/device/my-device-id/cmd");
+
+      ResponsePacket *responsePacket = deviceService.supportedServicesResponsePacket();
+      mqttClient.publish("/device/my-device-id/data", Packet :: stringifyResponse(responsePacket));
     } else {
       Serial.print("failed, rc=");
-      Serial.print(client.state());
+      Serial.print(mqttClient.state());
       Serial.println(" try again in 5 seconds");
       // Wait 5 seconds before retrying
       delay(5000);
@@ -81,19 +214,10 @@ void reconnect() {
   }
 }
 
+
 void loop() {
-  if (!client.connected()) {
+  if (!mqttClient.connected()) {
     reconnect();
   }
-  client.loop();
-
-  long now = millis();
-    if (now - lastMsg > 2000) {
-      lastMsg = now;
-      ++value;
-      snprintf (msg, 75, "hello world #%ld", value);
-      Serial.print("Publish message: ");
-      Serial.println(msg);
-      client.publish("outTopic", msg);
-    }
+  mqttClient.loop();
 }
