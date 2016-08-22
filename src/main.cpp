@@ -44,11 +44,11 @@ void saveConfigCallback () {
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");Serial.print(topic);Serial.print("] ");
   // Allocate the correct amount of memory for the payload copy
-  char* p = (char*)malloc(length+1);
+  unsigned char* p = (unsigned char*)malloc(length+1);
   // Copy the payload to the new buffer
   memcpy(p,payload,length);
   p[length]=0;
-  Serial.println(p);
+  // Serial.println(p);
 
   deviceService.process(Packet::parseWrite(p));
   // Free the memory
