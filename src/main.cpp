@@ -43,16 +43,16 @@ void saveConfigCallback () {
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");Serial.print(topic);Serial.print("] ");
-  // Allocate the correct amount of memory for the payload copy
-  unsigned char* p = (unsigned char*)malloc(length+1);
-  // Copy the payload to the new buffer
-  memcpy(p,payload,length);
-  p[length]=0;
-  // Serial.println(p);
+  // // Allocate the correct amount of memory for the payload copy
+  // unsigned char* p = (unsigned char*)malloc(length+1);
+  // // Copy the payload to the new buffer
+  // memcpy(p,payload,length);
+  // p[length]=0;
+  // // Serial.println(p);
 
-  deviceService.process(Packet::parseWrite(p));
+  deviceService.consume(WritePacket::parse(payload));
   // Free the memory
-  free(p);
+  free(payload);
 }
 
 void readConfig() {
@@ -203,7 +203,7 @@ void reconnect() {
       mqttClient.subscribe("/device/my-device-id/cmd");
 
       ResponsePacket *responsePacket = deviceService.supportedServicesResponsePacket();
-      mqttClient.publish("/device/my-device-id/data", Packet :: stringifyResponse(responsePacket));
+      mqttClient.publish("/device/my-device-id/data", ( char* )responsePacket->toBytes());
     } else {
       Serial.print("failed, rc=");
       Serial.print(mqttClient.state());
